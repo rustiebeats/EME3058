@@ -1,11 +1,3 @@
-# Object Follow-Avoid with DEEPSORT Tracking
-# ------------------------------------------
-# @Copyright (C): 2010-2019, Shenzhen Yahboom Tech
-# @Author: Malloy.Yuan
-# @Date: 2019-07-17 10:10:02
-# @LastEditors: Malloy.Yuan
-# @LastEditTime: 2019-09-17 17:54:19
-
 import torch
 import torchvision
 import torch.nn.functional as F
@@ -14,26 +6,28 @@ import numpy as np
 import threading
 import ctypes
 import inspect
-from jetbot import Robot, Camera, bgr8_to_jpeg
+from jetbot import Robot, Camera, bgr8_to_jpeg, ObjectDetector
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
-# Initialize robot and camera
 robot = Robot()
 camera = Camera.instance(width=300, height=300)
 
-# Load pre-trained collision avoidance model
+model = ObjectDetector('ssd_mobilenet_v2_coco.engine')
+
 collision_model = torchvision.models.alexnet(pretrained=False)
 collision_model.classifier[6] = torch.nn.Linear(collision_model.classifier[6].in_features, 2)
 collision_model.load_state_dict(torch.load('../collision_avoidance/best_model.pth'))
 collision_model = collision_model.to(torch.device('cuda'))
 
+# https://github.com/levan92/deep_sort_realtime
 # Initialize DEEPSORT tracker
-tracker = DeepSort(max_age=30, nn_budget=100, nms_max_overlap=1.0, max_iou_distance=0.7)
+tracker = DeepSort(max_age=30, nn_budget=100, nms_max_overlap=1.0, max_iou_distance=0.7, embedder="torchreid")
 
-# Preprocessing for collision detection
 mean = 255.0 * np.array([0.485, 0.456, 0.406])
 stdev = 255.0 * np.array([0.229, 0.224, 0.225])
 normalize = torchvision.transforms.Normalize(mean, stdev)
+
+target_person_id = None
 
 def preprocess(camera_value):
     x = camera_value
@@ -44,24 +38,20 @@ def preprocess(camera_value):
     x = normalize(x)
     return x.unsqueeze(0).to(torch.device('cuda'))
 
-# Detect the center of a bounding box
 def detection_center(bbox):
     center_x = (bbox[0] + bbox[2]) / 2.0 - 0.5
     center_y = (bbox[1] + bbox[3]) / 2.0 - 0.5
     return center_x, center_y
 
-# Detection loop
 def execute(image):
-    global robot, tracker
+    global robot, tracker, target_person_id
     collision_output = collision_model(preprocess(image)).detach().cpu()
     prob_blocked = float(F.softmax(collision_output.flatten(), dim=0)[0])
 
-    # Collision handling
     if prob_blocked > 0.7:
-        robot.left(0.5)
+        robot.left(0.5) # ??
         return
 
-    # Detect objects using model
     detections = model(image)
     detection_bboxes, detection_scores, detection_classes = [], [], []
     for det in detections[0]:
@@ -74,23 +64,54 @@ def execute(image):
 
     # Update DEEPSORT tracker
     tracks = tracker.update_tracks(detection_bboxes, detection_scores, image, detection_classes)
-
-    # Draw tracks and control robot
-    if tracks:
-        target = tracks[0]  # Use the first valid track
-        if target.is_confirmed():
-            bbox = target.to_ltrb()
+    
+    # if target_person_id is None:
+    #     for track in tracks:
+    #         if track.is_confirmed() and track.class_id == 1:
+    #             target_person_id = track.track_id
+    #             break
+    
+    target_found =  False
+    
+    for track in tracks:
+        if track.track_id == target_person_id and track.is_confirmed():
+            target_found = True
+            bbox = track.to_ltrb()
             center_x, _ = detection_center(bbox)
             robot.set_motors(
                 float(0.4 + 0.8 * center_x),
                 float(0.4 - 0.8 * center_x)
             )
+            break
+        
+    if not target_found:
+        if tracks:
+            if target.is_confirmed():
+                bbox = target.to_ltrb()
+                center_x, _ = detection_center(bbox)
+                robot.set_motors(
+                    float(0.4 + 0.8 * center_x),
+                    float(0.4 - 0.8 * center_x)
+                )
+            else:
+                robot.forward(0.4)
         else:
-            robot.forward(0.4)
-    else:
-        robot.forward(0.4)
+            robot.forward(0.4) 
+    
+    # if tracks:
+    #     target = tracks[0]   
+    #     if target.is_confirmed():
+    #         bbox = target.to_ltrb()
+    #         center_x, _ = detection_center(bbox)
+    #         robot.set_motors(
+    #             float(0.4 + 0.8 * center_x),
+    #             float(0.4 - 0.8 * center_x)
+    #         )
+    #     else:
+    #         robot.forward(0.4)
+    # else:
+    #     robot.forward(0.4)
 
-# Multithreading support
 def stop_thread(thread):
     tid = ctypes.c_long(thread.ident)
     if not inspect.isclass(SystemExit):
@@ -100,19 +121,16 @@ def stop_thread(thread):
         ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, None)
         raise SystemError("Thread termination failed")
 
-# Continuous execution loop
 def detection_loop():
     global camera
     while True:
         image = camera.value
         execute(image)
 
-# Start detection thread
 thread1 = threading.Thread(target=detection_loop)
 thread1.daemon = True
 thread1.start()
 
-# Cleanup on exit
 try:
     while True:
         pass
