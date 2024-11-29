@@ -6,6 +6,7 @@ import numpy as np
 import threading
 import ctypes
 import inspect
+from time import sleep
 from jetbot import Robot, Camera, bgr8_to_jpeg, ObjectDetector
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
@@ -62,17 +63,22 @@ def execute(image):
         detection_scores.append(det['confidence'])
         detection_classes.append(det['label'])
 
-    # Update DEEPSORT tracker
     tracks = tracker.update_tracks(detection_bboxes, detection_scores, image, detection_classes)
     
-    # if target_person_id is None:
-    #     for track in tracks:
-    #         if track.is_confirmed() and track.class_id == 1:
-    #             target_person_id = track.track_id
-    #             break
+    track_classes = {}  # Track ID -> class label
+    for track, cls in zip(tracks, detection_classes):
+        if track.is_confirmed():
+            track_classes[track.track_id] = cls
     
-    target_found =  False
-    
+    if target_person_id is None:
+        for track in tracks:
+            if track.is_confirmed() and track.track_id in track_classes:
+                if track_classes[track.track_id] == 1:  # Assuming '1' is the COCO label for person
+                    target_person_id = track.track_id
+                    print(f"Target person ID: {target_person_id}")
+                    break
+
+    target_found = False
     for track in tracks:
         if track.track_id == target_person_id and track.is_confirmed():
             target_found = True
@@ -83,34 +89,6 @@ def execute(image):
                 float(0.4 - 0.8 * center_x)
             )
             break
-        
-    if not target_found:
-        if tracks:
-            if target.is_confirmed():
-                bbox = target.to_ltrb()
-                center_x, _ = detection_center(bbox)
-                robot.set_motors(
-                    float(0.4 + 0.8 * center_x),
-                    float(0.4 - 0.8 * center_x)
-                )
-            else:
-                robot.forward(0.4)
-        else:
-            robot.forward(0.4) 
-    
-    # if tracks:
-    #     target = tracks[0]   
-    #     if target.is_confirmed():
-    #         bbox = target.to_ltrb()
-    #         center_x, _ = detection_center(bbox)
-    #         robot.set_motors(
-    #             float(0.4 + 0.8 * center_x),
-    #             float(0.4 - 0.8 * center_x)
-    #         )
-    #     else:
-    #         robot.forward(0.4)
-    # else:
-    #     robot.forward(0.4)
 
 def stop_thread(thread):
     tid = ctypes.c_long(thread.ident)
