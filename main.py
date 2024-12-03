@@ -73,7 +73,7 @@ def execute(image):
     if target_person_id is None:
         for track in tracks:
             if track.is_confirmed() and track.track_id in track_classes:
-                if track_classes[track.track_id] == 1:  # Assuming '1' is the COCO label for person
+                if track_classes[track.track_id] == 0:  # '0' is the COCO label for person
                     target_person_id = track.track_id
                     print(f"Target person ID: {target_person_id}")
                     break
